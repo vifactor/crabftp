@@ -5,4 +5,8 @@ project(crabftp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(crabftp main.cpp)
+add_executable(crabftp
+    main.cpp
+    server.h
+    server.cpp
+)
