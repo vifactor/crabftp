@@ -72,7 +72,7 @@ void Server::serve()
 
     while(!done) {
         int nfds = epoll_wait(epfd, evlist, MAX, -1);
-        if (ret == -1) {
+        if (nfds == -1) {
             perror("epoll_wait");
             break;
         }
@@ -94,12 +94,24 @@ void Server::serve()
                     continue;
                 }
 
+                // greet the ftp client
+                const std::string msg = "220 Welcome to the crabftp-Server\n";
+                ret = write(newsockfd, msg.data(), msg.size());
+                if (ret < 0) {
+                    std::cerr << "ERROR writing to socket" << std::endl;
+                    continue;
+                }
+
+                // add the client socket to the epoll monitoring list
                 ev.events = EPOLLIN;
                 ev.data.fd = newsockfd;
                 ret = epoll_ctl(epfd, EPOLL_CTL_ADD, newsockfd, &ev);
-                if (ret == -1) { perror("epoll_ctl"); break; }
+                if (ret == -1) {
+                    perror("epoll_ctl");
+                    break;
+                }
             } else {
-                std::cout << "Data received" << std::endl;
+                // FIXME: message can be larger than 256 bytes
                 char buffer[256] = {0};
                 ret = read(evlist[n].data.fd, buffer, 255);
                 if (ret < 0) {
@@ -110,12 +122,9 @@ void Server::serve()
                     close(evlist[n].data.fd);
                     continue;
                 }
-                std::cout << "Here is the message: " << buffer << strnlen(buffer, 256) << std::endl;
-                ret = write(evlist[n].data.fd, "I got your message", 18);
-                if (ret < 0) {
-                    std::cerr << "ERROR writing to socket" << std::endl;
-                    continue;
-                }
+
+                // TODO: here we handle the commands from clients
+                std::cout << "Received data:" <<  buffer << std::endl;
             }
         }
     }
