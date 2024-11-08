@@ -15,6 +15,43 @@ using namespace std::chrono_literals;
 
 namespace {
 bool done{false};
+
+struct FtpCommand {
+    std::string cmd;
+    std::string arg;
+};
+
+FtpCommand parseCommand(const std::string& cmd) {
+    FtpCommand ftpCmd;
+    auto pos = cmd.find(' ');
+    if (pos == std::string::npos) {
+        ftpCmd.cmd = cmd;
+    } else {
+        ftpCmd.cmd = cmd.substr(0, pos);
+        ftpCmd.arg = cmd.substr(pos + 1);
+    }
+    return ftpCmd;
+}
+
+std::string makeReply(const FtpCommand& cmd) {
+
+    if (cmd.cmd == "AUTH") {
+        // https://www.rfc-editor.org/rfc/rfc2228
+        // > If the server does recognize the AUTH command but does not implement the
+        // security extensions, it should respond with reply code 502.
+        return "502 Not implemented.\n";
+    }
+    // else if (cmd.cmd == "USER") {
+    //     return "331 Please specify the password.\n";
+    // } else if (cmd.cmd == "PASS") {
+    //     return "230 Login successful.\n";
+    // } else if (cmd.cmd == "SYST") {
+    //     return "215 UNIX Type: L8\n";
+    // } else if (cmd.cmd == "QUIT") {
+    //     return "221 Goodbye.\n";
+
+    return "";
+}
 }
 
 Server::Server() {
@@ -123,8 +160,17 @@ void Server::serve()
                     continue;
                 }
 
-                // TODO: here we handle the commands from clients
+                // here we handle the commands from clients
                 std::cout << "Received data:" <<  buffer << std::endl;
+                FtpCommand cmd = parseCommand(buffer);
+
+                // anwer the client appropriately
+                auto reply = makeReply(cmd);
+                ret = write(evlist[n].data.fd, reply.data(), reply.size());
+                if (ret < 0) {
+                    std::cerr << "ERROR writing to socket" << std::endl;
+                    continue;
+                }
             }
         }
     }
