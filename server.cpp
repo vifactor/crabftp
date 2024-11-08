@@ -15,43 +15,6 @@ using namespace std::chrono_literals;
 
 namespace {
 bool done{false};
-
-struct FtpCommand {
-    std::string cmd;
-    std::string arg;
-};
-
-FtpCommand parseCommand(const std::string& cmd) {
-    FtpCommand ftpCmd;
-    auto pos = cmd.find(' ');
-    if (pos == std::string::npos) {
-        ftpCmd.cmd = cmd;
-    } else {
-        ftpCmd.cmd = cmd.substr(0, pos);
-        ftpCmd.arg = cmd.substr(pos + 1);
-    }
-    return ftpCmd;
-}
-
-std::string makeReply(const FtpCommand& cmd) {
-
-    if (cmd.cmd == "AUTH") {
-        // https://www.rfc-editor.org/rfc/rfc2228
-        // > If the server does recognize the AUTH command but does not implement the
-        // security extensions, it should respond with reply code 502.
-        return "502 Not implemented.\n";
-    }
-    // else if (cmd.cmd == "USER") {
-    //     return "331 Please specify the password.\n";
-    // } else if (cmd.cmd == "PASS") {
-    //     return "230 Login successful.\n";
-    // } else if (cmd.cmd == "SYST") {
-    //     return "215 UNIX Type: L8\n";
-    // } else if (cmd.cmd == "QUIT") {
-    //     return "221 Goodbye.\n";
-
-    return "";
-}
 }
 
 Server::Server() {
@@ -60,6 +23,7 @@ Server::Server() {
         std::cout << "Interrupt signal (" << signum << ") received.\n";
         done = true;
     });
+    m_currentDataPort = 1026;
 }
 
 void Server::serve()
@@ -161,11 +125,12 @@ void Server::serve()
                 }
 
                 // here we handle the commands from clients
-                std::cout << "Received data:" <<  buffer << std::endl;
-                FtpCommand cmd = parseCommand(buffer);
+                std::cout << "Received data: " << buffer << std::endl;
+                Command cmd = parseCommand(buffer);
 
-                // anwer the client appropriately
-                auto reply = makeReply(cmd);
+                // answer the client appropriately
+                auto reply = makeReply(evlist[n].data.fd, cmd);
+                std::cout << "replying with " << reply << std::endl;
                 ret = write(evlist[n].data.fd, reply.data(), reply.size());
                 if (ret < 0) {
                     std::cerr << "ERROR writing to socket" << std::endl;
@@ -177,3 +142,136 @@ void Server::serve()
 
     close(sockfd);
 }
+
+Server::Command Server::parseCommand(const std::string& cmd) {
+    Command ftpCmd;
+    auto pos = cmd.find(' ');
+    if (pos == std::string::npos) {
+        ftpCmd.cmd = cmd.ends_with("\r\n") ? cmd.substr(0, cmd.size() - 2) : cmd;
+    } else {
+        ftpCmd.cmd = cmd.substr(0, pos);
+        ftpCmd.args = cmd.substr(pos + 1);
+    }
+    return ftpCmd;
+}
+
+std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
+
+    if (cmd.cmd == "AUTH") {
+        // https://www.rfc-editor.org/rfc/rfc2228
+        // > If the server does recognize the AUTH command but does not implement the
+        // security extensions, it should respond with reply code 502.
+        return "502 Not implemented.\n";
+    } else if (cmd.cmd == "USER") {
+        // we do not use authentication, so we accept any user name
+        return "230 User logged in, proceed.\n";
+    } else if (cmd.cmd == "PASS") {
+        // this command will never be called for this server because we accept all users
+        return "230 Login successful.\n";
+    } else if (cmd.cmd == "SYST") {
+        std::cout << "cmd.cmd=" << cmd.cmd << std::endl;
+        return "215 UNIX\n";
+    } else if (cmd.cmd == "FEAT") {
+        return "211-Features:\n"
+               " UTF8\n"
+               "211 End\n";
+    }
+    else if (cmd.cmd == "OPTS") {
+        return "200 OK\n";
+    } else if (cmd.cmd == "PWD") {
+        // This command displays the current working directory on the server for the logged in user.
+        // TODO: server has to preserve the current working directory for each user
+        return "257 \"/\" is the current directory\n";
+    } else if (cmd.cmd == "TYPE") {
+        // TODO: keep the binary or ascii mode for each user, https://cr.yp.to/ftp/type.html#type
+        return "200 Type set to I.\n";
+    } else if (cmd.cmd == "PASV") {
+        // Server response is a single line showing the IP address of the server and the TCP port
+        // number where the server is accepting data connections. servers use the format:
+        //          227 =h1,h2,h3,h4,p1,p2
+        // where the server's IP address is h1.h2.h3.h4 and the TCP port number is p1*256+p2.
+        if (m_clients.contains(fd)) {
+            // TODO: close old connection, provide new port
+        } else {
+            // FIXME: request available port from OS
+            const int nextDataPort = m_currentDataPort++;
+            m_clients[fd] = {nextDataPort};
+            const auto p1 = nextDataPort / 256;
+            const auto p2 = nextDataPort % 256;
+            return "227 Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")\n";
+        }
+    } else if (cmd.cmd == "LIST") {
+
+        //write listing to the data connection
+        const auto dataport = m_clients.at(fd).port;
+        std::cout << "Dataport: " << dataport << std::endl;
+
+        sockaddr_in serv_addr;
+        memset((void *) &serv_addr, 0, sizeof(serv_addr));
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_addr.s_addr = INADDR_ANY;
+        serv_addr.sin_port = htons(dataport);
+
+        int datafd = socket(AF_INET, SOCK_STREAM, 0);
+        if (datafd < 0) {
+            std::cerr << "ERROR opening data socket";
+            return "";
+        }
+        if (bind(datafd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+            std::cerr << "ERROR on binding data socket" << std::endl;
+            return "";
+        }
+        if (listen(datafd, 5) < 0) {
+            std::cerr << "ERROR on listening data socket" << std::endl;
+            return "";
+        }
+
+        std::cout << "Accepting data" << std::endl;
+        sockaddr_in cli_addr;
+        socklen_t clilen = sizeof(cli_addr);
+        int clidatafd = accept(datafd, (struct sockaddr *)&cli_addr, &clilen);
+        if (clidatafd < 0) {
+            std::cerr << "ERROR on accept" << std::endl;
+            return "";
+        }
+        std::cout << "Data connection accepted" << std::endl;
+
+        std::string reply = "150 Here comes the directory listing.\n";
+        int ret = write(fd, reply.data(), reply.size());
+        if (ret < 0) {
+            std::cerr << "ERROR writing to socket" << std::endl;
+            // FIXME: reply with error code
+            return "";
+        };
+
+        reply = "drwxr-xr-x 2 1000 1000 4096 Mar  1 10:00 .\n"
+                "drwxr-xr-x 2 1000 1000 4096 Mar  1 10:00 ..\n"
+                "-rw-r--r-- 1 1000 1000  220 Mar  1 10:00 file1.txt\n"
+                "-rw-r--r-- 1 1000 1000  220 Mar  1 10:00 file2.txt\n";
+        write(clidatafd, reply.data(), reply.size());
+        close(datafd);
+        close(clidatafd);
+
+        return "226 Directory send OK.\n";
+        // } else if (cmd.cmd == "RETR") {
+        //     return "150 Opening BINARY mode data connection for file1.txt (220 bytes).\n"
+        //            "226 Transfer complete.\n";
+        // } else if (cmd.cmd == "STOR") {
+        //     return "150 Ok to send data.\n"
+        //            "226 Transfer complete.\n";
+        // } else if (cmd.cmd == "NOOP") {
+        //     return "200 NOOP ok.\n";
+    } else if (cmd.cmd == "QUIT") {
+        return "221 Goodbye.\n";
+    }
+
+           // print command byte by byte
+    std::cout << "Unknown command:" << cmd.cmd << '\n';
+    for (char c : cmd.cmd) {
+        std::cout << (int)c << " ";
+    }
+    std::cout << std::endl;
+
+    return "";
+}
+
