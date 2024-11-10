@@ -17,6 +17,8 @@ class Server {
 
     struct Client {
         int port;
+        // relative to server's rootPath
+        std::string cwd;
     };
     using ClientSocket = int;
 

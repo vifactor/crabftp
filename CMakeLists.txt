@@ -13,5 +13,9 @@ add_executable(crabftp
     server.cpp
 )
 
+target_link_libraries(crabftp fs)
+
+#--------------------
+
 add_executable(ls ls.cpp)
 target_link_libraries(ls fs)

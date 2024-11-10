@@ -1,5 +1,7 @@
 #include "server.h"
 
+#include <fs.h>
+
 #include <thread>
 #include <chrono>
 #include <csignal>
@@ -15,6 +17,7 @@ using namespace std::chrono_literals;
 
 namespace {
 bool done{false};
+std::filesystem::path rootPath{"/lhome/vikkopp"};
 }
 
 Server::Server() {
@@ -244,13 +247,11 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
             return "";
         };
 
-        reply = ".\n"
-                "..\n"
-                "file1.txt\n"
-                "file2.txt\n";
-        write(clidatafd, reply.data(), reply.size());
-        close(datafd);
+        auto listing = listDirContents(rootPath / m_clients.at(fd).cwd);
+
+        write(clidatafd, listing.data(), listing.size());
         close(clidatafd);
+        close(datafd);
 
         return "226 Directory send OK.\n";
         // } else if (cmd.cmd == "RETR") {

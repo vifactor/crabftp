@@ -90,5 +90,8 @@ std::string listDirContents(const std::filesystem::path &path)
 
         result += entry.path().filename().string() + "\n";
     }
+
+    std::cout << path.string() << ":\n" << result << std::endl;
+
     return result;
 }
