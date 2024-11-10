@@ -244,10 +244,10 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
             return "";
         };
 
-        reply = "drwxr-xr-x 2 1000 1000 4096 Mar  1 10:00 .\n"
-                "drwxr-xr-x 2 1000 1000 4096 Mar  1 10:00 ..\n"
-                "-rw-r--r-- 1 1000 1000  220 Mar  1 10:00 file1.txt\n"
-                "-rw-r--r-- 1 1000 1000  220 Mar  1 10:00 file2.txt\n";
+        reply = ".\n"
+                "..\n"
+                "file1.txt\n"
+                "file2.txt\n";
         write(clidatafd, reply.data(), reply.size());
         close(datafd);
         close(clidatafd);
