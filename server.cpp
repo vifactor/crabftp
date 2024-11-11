@@ -7,6 +7,7 @@
 #include <csignal>
 #include <iostream>
 #include <cstring>
+#include <fstream>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -280,14 +281,67 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         } else {
             return "550 File not found.\n";
         }
-        // } else if (cmd.cmd == "RETR") {
-        //     return "150 Opening BINARY mode data connection for file1.txt (220 bytes).\n"
-        //            "226 Transfer complete.\n";
-        // } else if (cmd.cmd == "STOR") {
-        //     return "150 Ok to send data.\n"
-        //            "226 Transfer complete.\n";
-        // } else if (cmd.cmd == "NOOP") {
-        //     return "200 NOOP ok.\n";
+    } else if (cmd.cmd == "RETR") {
+        //write listing to the data connection
+        const auto dataport = m_clients.at(fd).port;
+        std::cout << "Dataport: " << dataport << std::endl;
+
+        sockaddr_in serv_addr;
+        memset((void *) &serv_addr, 0, sizeof(serv_addr));
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_addr.s_addr = INADDR_ANY;
+        serv_addr.sin_port = htons(dataport);
+
+        int datafd = socket(AF_INET, SOCK_STREAM, 0);
+        if (datafd < 0) {
+            std::cerr << "ERROR opening data socket";
+            return "";
+        }
+        if (bind(datafd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+            std::cerr << "ERROR on binding data socket" << std::endl;
+            return "";
+        }
+        if (listen(datafd, 5) < 0) {
+            std::cerr << "ERROR on listening data socket" << std::endl;
+            return "";
+        }
+
+        std::cout << "Accepting data" << std::endl;
+        sockaddr_in cli_addr;
+        socklen_t clilen = sizeof(cli_addr);
+        int clidatafd = accept(datafd, (struct sockaddr *)&cli_addr, &clilen);
+        if (clidatafd < 0) {
+            std::cerr << "ERROR on accept" << std::endl;
+            return "";
+        }
+        std::cout << "Data connection accepted" << std::endl;
+
+        std::string reply = "150 Ok to send data.\n";
+        int ret = write(fd, reply.data(), reply.size());
+        if (ret < 0) {
+            std::cerr << "ERROR writing to socket" << std::endl;
+            // FIXME: reply with error code
+            return "";
+        };
+
+        auto filepath = rootPath / m_clients.at(fd).cwd / cmd.args;
+        auto content = [&filepath](){
+            std::ifstream file(filepath, std::ios::binary);
+            if (!file.is_open()) {
+                return std::string{};
+            }
+            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            return content;
+        }();
+
+        write(clidatafd, content.data(), content.size());
+        std::cout << "clidatafd: " << clidatafd << std::endl;
+        std::cout << "datafd: " << datafd << std::endl;
+
+        close(clidatafd);
+        close(datafd);
+
+        return "226 Transfer complete.\n";
     } else if (cmd.cmd == "QUIT") {
         return "221 Goodbye.\n";
     }
