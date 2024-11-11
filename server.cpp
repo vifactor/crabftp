@@ -150,10 +150,12 @@ Server::Command Server::parseCommand(const std::string& cmd) {
     Command ftpCmd;
     auto pos = cmd.find(' ');
     if (pos == std::string::npos) {
-        ftpCmd.cmd = cmd.ends_with("\r\n") ? cmd.substr(0, cmd.size() - 2) : cmd;
+        // compensate for \r\n
+        ftpCmd.cmd = cmd.substr(0, cmd.size() - 2);
     } else {
         ftpCmd.cmd = cmd.substr(0, pos);
-        ftpCmd.args = cmd.substr(pos + 1);
+        // compensate for \r\n
+        ftpCmd.args = cmd.substr(pos + 1, cmd.size() - (pos + 1) - 2);
     }
     return ftpCmd;
 }
@@ -193,16 +195,14 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         // number where the server is accepting data connections. servers use the format:
         //          227 =h1,h2,h3,h4,p1,p2
         // where the server's IP address is h1.h2.h3.h4 and the TCP port number is p1*256+p2.
-        if (m_clients.contains(fd)) {
-            // TODO: close old connection, provide new port
-        } else {
-            // FIXME: request available port from OS
-            const int nextDataPort = m_currentDataPort++;
-            m_clients[fd] = {nextDataPort};
-            const auto p1 = nextDataPort / 256;
-            const auto p2 = nextDataPort % 256;
-            return "227 Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")\n";
-        }
+
+        // TODO: request available port from OS
+        const int nextDataPort = m_currentDataPort++;
+        m_clients[fd] = {nextDataPort};
+        std::cout << "Client's fd: " << fd << std::endl;
+        const auto p1 = nextDataPort / 256;
+        const auto p2 = nextDataPort % 256;
+        return "227 Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")\n";
     } else if (cmd.cmd == "LIST") {
 
         //write listing to the data connection
@@ -250,10 +250,36 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         auto listing = listDirContents(rootPath / m_clients.at(fd).cwd);
 
         write(clidatafd, listing.data(), listing.size());
+        std::cout << "clidatafd: " << clidatafd << std::endl;
+        std::cout << "datafd: " << datafd << std::endl;
+
         close(clidatafd);
         close(datafd);
 
         return "226 Directory send OK.\n";
+    } else if (cmd.cmd == "CWD") {
+        // This command allows the user to change the current working directory to the specified directory.
+        // The new directory must be specified as a parameter.
+        // The server response is a 250 status code if the directory change was successful.
+        if (std::filesystem::exists(rootPath / cmd.args)) {
+            m_clients[fd].cwd = cmd.args;
+            return "250 Directory successfully changed.\n";
+        } else {
+            // If the directory does not exist or the user does not have permission to access the directory,
+            // the server will return a 550 status code.
+            return "550 Failed to change directory.\n";
+        }
+    } else if (cmd.cmd == "SIZE") {
+        // This command is used to determine the size of a file on the server.
+        // The server response is a 213 status code followed by the size of the file in bytes.
+        // If the file does not exist or the user does not have permission to access the file,
+        // the server will return a 550 status code.
+        auto path = rootPath / m_clients.at(fd).cwd / cmd.args;
+        if (std::filesystem::exists(path)) {
+            return "213 " + std::to_string(std::filesystem::file_size(path)) + "\n";
+        } else {
+            return "550 File not found.\n";
+        }
         // } else if (cmd.cmd == "RETR") {
         //     return "150 Opening BINARY mode data connection for file1.txt (220 bytes).\n"
         //            "226 Transfer complete.\n";
