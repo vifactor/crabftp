@@ -292,9 +292,15 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         // This command allows the user to change the current working directory to the specified directory.
         // The new directory must be specified as a parameter.
         // The server response is a 250 status code if the directory change was successful.
-        if (std::filesystem::exists(rootPath / cmd.args)) {
+        if (!m_clients.contains(fd)) {
+            m_clients[fd] = {++m_currentDataPort, "/"}; // default directory is root
+        }
+
+        if (auto path = ::makeServerPath(m_clients[fd].cwd) / cmd.args; std::filesystem::exists(path)) {
             // FIXME: for the case of "." and ".."
-            m_clients[fd].cwd = m_clients[fd].cwd + cmd.args;
+            auto& cwd = m_clients[fd].cwd;
+            auto appender = cwd.ends_with("/") ? cmd.args : "/" + cmd.args;
+            cwd += appender;
             return "250 Directory successfully changed.\n";
         } else {
             // If the directory does not exist or the user does not have permission to access the directory,
