@@ -3,7 +3,7 @@
 
 
 int main() {
-    std::cout << "Hello World!" << std::endl;
+    std::cout << "Welcome to crabftp server!" << std::endl;
 
     Server s;
     s.serve();

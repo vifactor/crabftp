@@ -8,6 +8,7 @@
 #include <iostream>
 #include <cstring>
 #include <fstream>
+#include <optional>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -19,6 +20,48 @@ using namespace std::chrono_literals;
 namespace {
 bool done{false};
 std::filesystem::path rootPath{"/lhome/vikkopp"};
+
+std::optional<int> makeSocket(int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    // TODO: should fd be closed on failure?
+    if (fd < 0) {
+        std::cerr << "ERROR opening socket";
+        return std::nullopt;
+    }
+
+    sockaddr_in servAddr;
+    memset((void *) &servAddr, 0, sizeof(servAddr));
+    servAddr.sin_family = AF_INET;
+    servAddr.sin_addr.s_addr = INADDR_ANY;
+    servAddr.sin_port = htons(port);
+
+    int opt = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt))<0)
+    {
+        perror("setsockopt");
+        return std::nullopt;
+    };
+
+    if (bind(fd, (struct sockaddr *)&servAddr, sizeof(servAddr)) < 0) {
+        perror("ERROR on binding socket");
+        return std::nullopt;
+    }
+    if (listen(fd, 5) < 0) {
+        perror("ERROR on listening socket");
+        return std::nullopt;
+    }
+
+    return fd;
+}
+
+std::filesystem::path makeServerPath(std::string& subpath) {
+    if (subpath == "/") {
+        return rootPath;
+    } else {
+        return rootPath / subpath.substr(1);
+    }
+}
 }
 
 Server::Server() {
@@ -33,28 +76,17 @@ Server::Server() {
 void Server::serve()
 {
     // TODO: --- this can go to the constructor ---
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        std::cerr << "ERROR opening socket";
+    const auto sockfd = makeSocket(1025);
+    if (!sockfd) {
         return;
     }
-
-    sockaddr_in serv_addr;
-    memset((void *) &serv_addr, 0, sizeof(serv_addr));
-    const int portno = 1025;
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(portno);
-
-    if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        std::cerr << "ERROR on binding" << std::endl;
-        return;
-    }
-    listen(sockfd, 5);
     // ------------------------------------------
 
     int epfd = epoll_create1(0);
-    if (0 > epfd) { perror("epoll_create1"); exit(1); }
+    if (0 > epfd) {
+        perror("epoll_create1");
+        exit(1);
+    }
 
     epoll_event ev;
     ev.events = EPOLLIN;
@@ -65,8 +97,8 @@ void Server::serve()
         return;
     }
 
-    ev.data.fd = sockfd;
-    ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev);
+    ev.data.fd = *sockfd;
+    ret = epoll_ctl(epfd, EPOLL_CTL_ADD, *sockfd, &ev);
     if (0 > ret) {
         perror("epoll_ctl");
         return;
@@ -82,18 +114,17 @@ void Server::serve()
             break;
         }
 
-        std::cout << "nfds: " << nfds << std::endl;
         for (int n = 0; n < nfds; ++n) {
             if (evlist[n].data.fd == STDIN_FILENO) {
                 char buf[256] = {0};
                 fgets(buf, sizeof(buf) - 1, stdin);
                 std::cout << "Some input received: " << buf << std::endl;
-            } else if (evlist[n].data.fd == sockfd) {
+            } else if (evlist[n].data.fd == *sockfd) {
 
                 std::cout << "New connection" << std::endl;
                 struct sockaddr_in cli_addr;
                 socklen_t clilen = sizeof(cli_addr);
-                int newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
+                int newsockfd = accept(*sockfd, (struct sockaddr *)&cli_addr, &clilen);
                 if (newsockfd < 0) {
                     std::cerr << "ERROR on accept" << std::endl;
                     continue;
@@ -129,7 +160,6 @@ void Server::serve()
                 }
 
                 // here we handle the commands from clients
-                std::cout << "Received data: " << buffer << std::endl;
                 Command cmd = parseCommand(buffer);
 
                 // answer the client appropriately
@@ -144,7 +174,7 @@ void Server::serve()
         }
     }
 
-    close(sockfd);
+    close(*sockfd);
 }
 
 Server::Command Server::parseCommand(const std::string& cmd) {
@@ -162,6 +192,14 @@ Server::Command Server::parseCommand(const std::string& cmd) {
 }
 
 std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
+
+    std::cout << "Received cmd: " << cmd.cmd << "(" << cmd.args << ")" << " on fd: " << fd << std::endl;
+    if (m_clients.contains(fd)) {
+        const auto& client = m_clients[fd];
+        std::cout << "Client port: " << client.port << " Client cwd: " << client.cwd << std::endl;
+    } else {
+        std::cout << "New client" << std::endl;
+    }
 
     if (cmd.cmd == "AUTH") {
         // https://www.rfc-editor.org/rfc/rfc2228
@@ -186,10 +224,8 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         return "200 OK\n";
     } else if (cmd.cmd == "PWD") {
         // This command displays the current working directory on the server for the logged in user.
-        if (!m_clients.contains(fd)) {
-            m_clients[fd].cwd = "/";
-        }
-        return "257 " + m_clients[fd].cwd + " is the current directory\n";
+        auto cwd = m_clients.contains(fd) ? m_clients[fd].cwd : "/";
+        return "257 " + cwd + " is the current directory\n";
     } else if (cmd.cmd == "TYPE") {
         // TODO: keep the binary or ascii mode for each user, https://cr.yp.to/ftp/type.html#type
         return "200 Type set to I.\n";
@@ -199,9 +235,11 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         //          227 =h1,h2,h3,h4,p1,p2
         // where the server's IP address is h1.h2.h3.h4 and the TCP port number is p1*256+p2.
 
-        // TODO: request available port from OS
-        const int nextDataPort = m_currentDataPort++;
-        m_clients[fd] = {nextDataPort};
+        if (!m_clients.contains(fd)) {
+            m_clients[fd] = {++m_currentDataPort, "/"};
+        }
+
+        auto nextDataPort = m_clients[fd].port;
         std::cout << "Client's fd: " << fd << " port: " << nextDataPort << std::endl;
         const auto p1 = nextDataPort / 256;
         const auto p2 = nextDataPort % 256;
@@ -209,41 +247,23 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
 
         return "227 Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")\n";
     } else if (cmd.cmd == "LIST") {
-
-        std::cout << "CWD: " << m_clients.at(fd).cwd << std::endl;
         //write listing to the data connection
         const auto dataport = m_clients.at(fd).port;
         std::cout << "Dataport: " << dataport << std::endl;
 
-        sockaddr_in serv_addr;
-        memset((void *) &serv_addr, 0, sizeof(serv_addr));
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_addr.s_addr = INADDR_ANY;
-        serv_addr.sin_port = htons(dataport);
-
-        int datafd = socket(AF_INET, SOCK_STREAM, 0);
-        if (datafd < 0) {
-            std::cerr << "ERROR opening data socket";
+        auto datafd = makeSocket(m_clients.at(fd).port);
+        if (!datafd)
             return "";
-        }
-        if (bind(datafd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-            std::cerr << "ERROR on binding data socket" << std::endl;
-            return "";
-        }
-        if (listen(datafd, 5) < 0) {
-            std::cerr << "ERROR on listening data socket" << std::endl;
-            return "";
-        }
 
         std::cout << "Accepting data" << std::endl;
         sockaddr_in cli_addr;
         socklen_t clilen = sizeof(cli_addr);
-        int clidatafd = accept(datafd, (struct sockaddr *)&cli_addr, &clilen);
+        int clidatafd = accept(*datafd, (struct sockaddr *)&cli_addr, &clilen);
         if (clidatafd < 0) {
             std::cerr << "ERROR on accept" << std::endl;
             return "";
         }
-        std::cout << "Data connection accepted" << std::endl;
+        std::cout << "Data connection accepted. Serv fd: " << *datafd << " Cli fd: " << clidatafd << std::endl;
 
         std::string reply = "150 Here comes the directory listing.\n";
         int ret = write(fd, reply.data(), reply.size());
@@ -253,14 +273,15 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
             return "";
         };
 
-        auto listing = listDirContents(rootPath / m_clients.at(fd).cwd);
+        auto path = ::makeServerPath(m_clients.at(fd).cwd);
+        auto listing = listDirContents(path);
 
         write(clidatafd, listing.data(), listing.size());
         std::cout << "clidatafd: " << clidatafd << std::endl;
-        std::cout << "datafd: " << datafd << std::endl;
+        std::cout << "datafd: " << *datafd << std::endl;
 
         close(clidatafd);
-        close(datafd);
+        close(*datafd);
 
         return "226 Directory send OK.\n";
     } else if (cmd.cmd == "CWD") {
@@ -281,7 +302,7 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         // The server response is a 213 status code followed by the size of the file in bytes.
         // If the file does not exist or the user does not have permission to access the file,
         // the server will return a 550 status code.
-        auto path = rootPath / m_clients.at(fd).cwd / cmd.args;
+        auto path = ::makeServerPath(m_clients.at(fd).cwd) / cmd.args;
         if (std::filesystem::exists(path)) {
             return "213 " + std::to_string(std::filesystem::file_size(path)) + "\n";
         } else {
@@ -290,32 +311,14 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
     } else if (cmd.cmd == "RETR") {
         //write listing to the data connection
         const auto dataport = m_clients.at(fd).port;
-        std::cout << "Dataport: " << dataport << std::endl;
-
-        sockaddr_in serv_addr;
-        memset((void *) &serv_addr, 0, sizeof(serv_addr));
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_addr.s_addr = INADDR_ANY;
-        serv_addr.sin_port = htons(dataport);
-
-        int datafd = socket(AF_INET, SOCK_STREAM, 0);
-        if (datafd < 0) {
-            std::cerr << "ERROR opening data socket";
+        auto datafd = ::makeSocket(dataport);
+        if (!datafd)
             return "";
-        }
-        if (bind(datafd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-            std::cerr << "ERROR on binding data socket" << std::endl;
-            return "";
-        }
-        if (listen(datafd, 5) < 0) {
-            std::cerr << "ERROR on listening data socket" << std::endl;
-            return "";
-        }
 
         std::cout << "Accepting data" << std::endl;
         sockaddr_in cli_addr;
         socklen_t clilen = sizeof(cli_addr);
-        int clidatafd = accept(datafd, (struct sockaddr *)&cli_addr, &clilen);
+        int clidatafd = accept(*datafd, (struct sockaddr *)&cli_addr, &clilen);
         if (clidatafd < 0) {
             std::cerr << "ERROR on accept" << std::endl;
             return "";
@@ -330,7 +333,7 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
             return "";
         };
 
-        auto filepath = rootPath / m_clients.at(fd).cwd / cmd.args;
+        auto filepath = ::makeServerPath(m_clients.at(fd).cwd) / cmd.args;
         auto content = [&filepath](){
             std::ifstream file(filepath, std::ios::binary);
             if (!file.is_open()) {
@@ -342,17 +345,17 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
 
         write(clidatafd, content.data(), content.size());
         std::cout << "clidatafd: " << clidatafd << std::endl;
-        std::cout << "datafd: " << datafd << std::endl;
+        std::cout << "datafd: " << *datafd << std::endl;
 
         close(clidatafd);
-        close(datafd);
+        close(*datafd);
 
         return "226 Transfer complete.\n";
     } else if (cmd.cmd == "QUIT") {
         return "221 Goodbye.\n";
     }
 
-           // print command byte by byte
+    // print command byte by byte
     std::cout << "Unknown command:" << cmd.cmd << '\n';
     for (char c : cmd.cmd) {
         std::cout << (int)c << " ";

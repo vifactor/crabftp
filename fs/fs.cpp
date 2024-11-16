@@ -51,6 +51,8 @@ unsigned filesCount(const std::filesystem::path& path)
 // "-rw-r--r-- 1 1000 1000  220 Mar  1 10:00 file1.txt\n"
 std::string listDirContents(const std::filesystem::path &path)
 {
+    std::cout << "Requested listing of: " << path << std::endl;
+
     std::string result;
     for (const auto &entry : std::filesystem::directory_iterator(path))
     {
