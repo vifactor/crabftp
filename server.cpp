@@ -186,8 +186,10 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         return "200 OK\n";
     } else if (cmd.cmd == "PWD") {
         // This command displays the current working directory on the server for the logged in user.
-        // TODO: server has to preserve the current working directory for each user
-        return "257 \"/\" is the current directory\n";
+        if (!m_clients.contains(fd)) {
+            m_clients[fd].cwd = "/";
+        }
+        return "257 " + m_clients[fd].cwd + " is the current directory\n";
     } else if (cmd.cmd == "TYPE") {
         // TODO: keep the binary or ascii mode for each user, https://cr.yp.to/ftp/type.html#type
         return "200 Type set to I.\n";
@@ -200,12 +202,15 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         // TODO: request available port from OS
         const int nextDataPort = m_currentDataPort++;
         m_clients[fd] = {nextDataPort};
-        std::cout << "Client's fd: " << fd << std::endl;
+        std::cout << "Client's fd: " << fd << " port: " << nextDataPort << std::endl;
         const auto p1 = nextDataPort / 256;
         const auto p2 = nextDataPort % 256;
+        // FIXME: should we have the data socket accepting connection on the data port already at this point?
+
         return "227 Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")\n";
     } else if (cmd.cmd == "LIST") {
 
+        std::cout << "CWD: " << m_clients.at(fd).cwd << std::endl;
         //write listing to the data connection
         const auto dataport = m_clients.at(fd).port;
         std::cout << "Dataport: " << dataport << std::endl;
@@ -263,7 +268,8 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         // The new directory must be specified as a parameter.
         // The server response is a 250 status code if the directory change was successful.
         if (std::filesystem::exists(rootPath / cmd.args)) {
-            m_clients[fd].cwd = cmd.args;
+            // FIXME: for the case of "." and ".."
+            m_clients[fd].cwd = m_clients[fd].cwd + cmd.args;
             return "250 Directory successfully changed.\n";
         } else {
             // If the directory does not exist or the user does not have permission to access the directory,
