@@ -243,27 +243,29 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         std::cout << "Client's fd: " << fd << " port: " << nextDataPort << std::endl;
         const auto p1 = nextDataPort / 256;
         const auto p2 = nextDataPort % 256;
-        // FIXME: should we have the data socket accepting connection on the data port already at this point?
+
+        m_clients[fd].dataFuture = std::async(std::launch::async, [port = m_clients[fd].port]()-> std::pair<int, int>{
+            auto datafd = makeSocket(port);
+            if (!datafd) {
+                return {0, 0};
+            }
+
+            std::cout << "Async accepting data" << std::endl;
+            sockaddr_in cli_addr;
+            socklen_t clilen = sizeof(cli_addr);
+            int clidatafd = accept(*datafd, (struct sockaddr *)&cli_addr, &clilen);
+            if (clidatafd < 0) {
+                std::cerr << "ERROR on accept" << std::endl;
+                return {0, 0};
+            }
+            std::cout << "Async data connection accepted" << std::endl;
+
+            return {*datafd, clidatafd};
+        });
 
         return "227 Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")\n";
     } else if (cmd.cmd == "LIST") {
         //write listing to the data connection
-        const auto dataport = m_clients.at(fd).port;
-        std::cout << "Dataport: " << dataport << std::endl;
-
-        auto datafd = makeSocket(m_clients.at(fd).port);
-        if (!datafd)
-            return "";
-
-        std::cout << "Accepting data" << std::endl;
-        sockaddr_in cli_addr;
-        socklen_t clilen = sizeof(cli_addr);
-        int clidatafd = accept(*datafd, (struct sockaddr *)&cli_addr, &clilen);
-        if (clidatafd < 0) {
-            std::cerr << "ERROR on accept" << std::endl;
-            return "";
-        }
-        std::cout << "Data connection accepted. Serv fd: " << *datafd << " Cli fd: " << clidatafd << std::endl;
 
         std::string reply = "150 Here comes the directory listing.\n";
         int ret = write(fd, reply.data(), reply.size());
@@ -273,15 +275,17 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
             return "";
         };
 
+        auto [datafd, clidatafd] = m_clients[fd].dataFuture.get();
+
         auto path = ::makeServerPath(m_clients.at(fd).cwd);
         auto listing = listDirContents(path);
 
         write(clidatafd, listing.data(), listing.size());
         std::cout << "clidatafd: " << clidatafd << std::endl;
-        std::cout << "datafd: " << *datafd << std::endl;
+        std::cout << "datafd: " << datafd << std::endl;
 
         close(clidatafd);
-        close(*datafd);
+        close(datafd);
 
         return "226 Directory send OK.\n";
     } else if (cmd.cmd == "CWD") {

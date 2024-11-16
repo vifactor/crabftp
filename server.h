@@ -3,6 +3,7 @@
 
 #include <unordered_map>
 #include <string>
+#include <future>
 
 class Server {
   public:
@@ -19,6 +20,9 @@ class Server {
         int port;
         // relative to server's rootPath
         std::string cwd;
+
+        // server fd, client fd
+        std::future<std::pair<int, int>> dataFuture;
     };
     using ClientSocket = int;
 
