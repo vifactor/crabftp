@@ -3,11 +3,11 @@
 
 #include <unordered_map>
 #include <string>
-#include <future>
 
 class Server {
   public:
     Server();
+    ~Server();
     void serve();
 
   private:
@@ -20,17 +20,17 @@ class Server {
         int port;
         // relative to server's rootPath
         std::string cwd;
-
-        // server fd, client fd
-        std::future<std::pair<int, int>> dataFuture;
     };
     using ClientSocket = int;
 
     std::unordered_map<ClientSocket, Client> m_clients;
-    int m_currentDataPort;
+    int m_dataPort{1026};
+    int m_cmdPort{1025};
+
+    int m_dataSocket;
+    int m_cmdSocket;
   private:
     std::string makeReply(ClientSocket fd,  const Command& cmd);
-    void handleListCmd();
     static Command parseCommand(const std::string& cmd);
 };
 

@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
+#include <arpa/inet.h>
 
 using namespace std::chrono_literals;
 
@@ -62,6 +63,30 @@ std::filesystem::path makeServerPath(std::string& subpath) {
         return rootPath / subpath.substr(1);
     }
 }
+
+void logPeer(int sockfd) {
+    socklen_t len;
+    struct sockaddr_storage addr;
+    char ipstr[INET6_ADDRSTRLEN];
+    int port;
+
+    len = sizeof addr;
+    getpeername(sockfd, (struct sockaddr*)&addr, &len);
+
+    // deal with both IPv4 and IPv6:
+    if (addr.ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
+        port = ntohs(s->sin_port);
+        inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
+    } else { // AF_INET6
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *)&addr;
+        port = ntohs(s->sin6_port);
+        inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof ipstr);
+    }
+
+    std::cout << "Peer IP address: " << ipstr << std::endl;
+    std::cout << "Peer port      : " << port << std::endl;;
+}
 }
 
 Server::Server() {
@@ -70,22 +95,32 @@ Server::Server() {
         std::cout << "Interrupt signal (" << signum << ") received.\n";
         done = true;
     });
-    m_currentDataPort = 1026;
+
+    if (const auto socket = makeSocket(m_cmdPort); socket.has_value()) {
+        m_cmdSocket = *socket;
+    } else {
+        throw std::runtime_error("Failed to create command socket");
+    }
+
+    if (const auto socket = makeSocket(m_dataPort); socket.has_value()) {
+        m_dataSocket = *socket;
+    } else {
+        throw std::runtime_error("Failed to create data socket");
+    }
+}
+
+Server::~Server()
+{
+    close(m_cmdSocket);
+    close(m_dataSocket);
 }
 
 void Server::serve()
 {
-    // TODO: --- this can go to the constructor ---
-    const auto sockfd = makeSocket(1025);
-    if (!sockfd) {
-        return;
-    }
-    // ------------------------------------------
-
     int epfd = epoll_create1(0);
     if (0 > epfd) {
         perror("epoll_create1");
-        exit(1);
+        return;
     }
 
     epoll_event ev;
@@ -97,8 +132,15 @@ void Server::serve()
         return;
     }
 
-    ev.data.fd = *sockfd;
-    ret = epoll_ctl(epfd, EPOLL_CTL_ADD, *sockfd, &ev);
+    ev.data.fd = m_cmdSocket;
+    ret = epoll_ctl(epfd, EPOLL_CTL_ADD, m_cmdSocket, &ev);
+    if (0 > ret) {
+        perror("epoll_ctl");
+        return;
+    }
+
+    ev.data.fd = m_dataSocket;
+    ret = epoll_ctl(epfd, EPOLL_CTL_ADD, m_dataSocket, &ev);
     if (0 > ret) {
         perror("epoll_ctl");
         return;
@@ -119,12 +161,12 @@ void Server::serve()
                 char buf[256] = {0};
                 fgets(buf, sizeof(buf) - 1, stdin);
                 std::cout << "Some input received: " << buf << std::endl;
-            } else if (evlist[n].data.fd == *sockfd) {
+            } else if (evlist[n].data.fd == m_cmdSocket) {
 
-                std::cout << "New connection" << std::endl;
+                std::cout << "New cmd connection" << std::endl;
                 struct sockaddr_in cli_addr;
                 socklen_t clilen = sizeof(cli_addr);
-                int newsockfd = accept(*sockfd, (struct sockaddr *)&cli_addr, &clilen);
+                int newsockfd = accept(m_cmdSocket, (struct sockaddr *)&cli_addr, &clilen);
                 if (newsockfd < 0) {
                     std::cerr << "ERROR on accept" << std::endl;
                     continue;
@@ -146,7 +188,21 @@ void Server::serve()
                     perror("epoll_ctl");
                     break;
                 }
+            } else if (evlist[n].data.fd == m_dataSocket) {
+                std::cout << "New data connection" << std::endl;
+                struct sockaddr_in cli_addr;
+                socklen_t clilen = sizeof(cli_addr);
+                int newsockfd = accept(m_dataSocket, (struct sockaddr *)&cli_addr, &clilen);
+                if (newsockfd < 0) {
+                    std::cerr << "ERROR on accept" << std::endl;
+                    continue;
+                }
+                ::logPeer(newsockfd);
+
+                // TODO: here the data connection should be handled, e.g. list files in a directory
+                close(newsockfd);
             } else {
+                ::logPeer(evlist[n].data.fd);
                 // FIXME: message can be larger than 256 bytes
                 char buffer[256] = {0};
                 ret = read(evlist[n].data.fd, buffer, 255);
@@ -173,8 +229,6 @@ void Server::serve()
             }
         }
     }
-
-    close(*sockfd);
 }
 
 Server::Command Server::parseCommand(const std::string& cmd) {
@@ -236,64 +290,24 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         // where the server's IP address is h1.h2.h3.h4 and the TCP port number is p1*256+p2.
 
         if (!m_clients.contains(fd)) {
-            m_clients[fd] = {++m_currentDataPort, "/"};
+            m_clients[fd] = {m_dataPort, "/"};
         }
 
-        auto nextDataPort = m_clients[fd].port;
-        std::cout << "Client's fd: " << fd << " port: " << nextDataPort << std::endl;
-        const auto p1 = nextDataPort / 256;
-        const auto p2 = nextDataPort % 256;
-
-        m_clients[fd].dataFuture = std::async(std::launch::async, [port = m_clients[fd].port]()-> std::pair<int, int>{
-            auto datafd = makeSocket(port);
-            if (!datafd) {
-                return {0, 0};
-            }
-
-            std::cout << "Async accepting data" << std::endl;
-            sockaddr_in cli_addr;
-            socklen_t clilen = sizeof(cli_addr);
-            int clidatafd = accept(*datafd, (struct sockaddr *)&cli_addr, &clilen);
-            if (clidatafd < 0) {
-                std::cerr << "ERROR on accept" << std::endl;
-                return {0, 0};
-            }
-            std::cout << "Async data connection accepted" << std::endl;
-
-            return {*datafd, clidatafd};
-        });
+        auto dataPort = m_clients[fd].port;
+        std::cout << "Client's fd: " << fd << " port: " << dataPort << std::endl;
+        const auto p1 = dataPort / 256;
+        const auto p2 = dataPort % 256;
 
         return "227 Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")\n";
     } else if (cmd.cmd == "LIST") {
         //write listing to the data connection
-
-        std::string reply = "150 Here comes the directory listing.\n";
-        int ret = write(fd, reply.data(), reply.size());
-        if (ret < 0) {
-            std::cerr << "ERROR writing to socket" << std::endl;
-            // FIXME: reply with error code
-            return "";
-        };
-
-        auto [datafd, clidatafd] = m_clients[fd].dataFuture.get();
-
-        auto path = ::makeServerPath(m_clients.at(fd).cwd);
-        auto listing = listDirContents(path);
-
-        write(clidatafd, listing.data(), listing.size());
-        std::cout << "clidatafd: " << clidatafd << std::endl;
-        std::cout << "datafd: " << datafd << std::endl;
-
-        close(clidatafd);
-        close(datafd);
-
-        return "226 Directory send OK.\n";
+        return "150 Here comes the directory listing.\n";
     } else if (cmd.cmd == "CWD") {
         // This command allows the user to change the current working directory to the specified directory.
         // The new directory must be specified as a parameter.
         // The server response is a 250 status code if the directory change was successful.
         if (!m_clients.contains(fd)) {
-            m_clients[fd] = {++m_currentDataPort, "/"}; // default directory is root
+            m_clients[fd] = {m_dataPort, "/"}; // default directory is root
         }
 
         if (auto path = ::makeServerPath(m_clients[fd].cwd) / cmd.args; std::filesystem::exists(path)) {
@@ -320,47 +334,7 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         }
     } else if (cmd.cmd == "RETR") {
         //write listing to the data connection
-        const auto dataport = m_clients.at(fd).port;
-        auto datafd = ::makeSocket(dataport);
-        if (!datafd)
-            return "";
-
-        std::cout << "Accepting data" << std::endl;
-        sockaddr_in cli_addr;
-        socklen_t clilen = sizeof(cli_addr);
-        int clidatafd = accept(*datafd, (struct sockaddr *)&cli_addr, &clilen);
-        if (clidatafd < 0) {
-            std::cerr << "ERROR on accept" << std::endl;
-            return "";
-        }
-        std::cout << "Data connection accepted" << std::endl;
-
-        std::string reply = "150 Ok to send data.\n";
-        int ret = write(fd, reply.data(), reply.size());
-        if (ret < 0) {
-            std::cerr << "ERROR writing to socket" << std::endl;
-            // FIXME: reply with error code
-            return "";
-        };
-
-        auto filepath = ::makeServerPath(m_clients.at(fd).cwd) / cmd.args;
-        auto content = [&filepath](){
-            std::ifstream file(filepath, std::ios::binary);
-            if (!file.is_open()) {
-                return std::string{};
-            }
-            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            return content;
-        }();
-
-        write(clidatafd, content.data(), content.size());
-        std::cout << "clidatafd: " << clidatafd << std::endl;
-        std::cout << "datafd: " << *datafd << std::endl;
-
-        close(clidatafd);
-        close(*datafd);
-
-        return "226 Transfer complete.\n";
+        return "150 Ok to send data.\n";
     } else if (cmd.cmd == "QUIT") {
         return "221 Goodbye.\n";
     }
