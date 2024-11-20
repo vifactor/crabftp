@@ -199,8 +199,28 @@ void Server::serve()
                 }
                 ::logPeer(newsockfd);
 
-                // TODO: here the data connection should be handled, e.g. list files in a directory
+                if (m_pendingCmd == DataCommand::List) {
+                    // send the directory listing
+                    std::string listing = listDirContents(makeServerPath(m_clients.at(m_pendingClientSocket).cwd));
+                    ret = write(newsockfd, listing.data(), listing.size());
+                    if (ret < 0) {
+                        std::cerr << "ERROR writing to socket" << std::endl;
+                        continue;
+                    }
+
+                    // write to client's cmd socket
+                    std::string reply = "226 Directory send OK.\n";
+                    ret = write(m_pendingClientSocket, reply.data(), reply.size());
+                    if (ret < 0) {
+                        std::cerr << "ERROR writing to socket" << std::endl;
+                        continue;
+                    }
+                }
                 close(newsockfd);
+
+                m_pendingCmd = DataCommand::None;
+                m_isDataPortBusy = false;
+
             } else {
                 ::logPeer(evlist[n].data.fd);
                 // FIXME: message can be larger than 256 bytes
@@ -289,6 +309,12 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         //          227 =h1,h2,h3,h4,p1,p2
         // where the server's IP address is h1.h2.h3.h4 and the TCP port number is p1*256+p2.
 
+        if(m_isDataPortBusy) {
+            // we do not accept new data connections while the previous one is still active
+            return "425 Can't open data connection.\n";
+        }
+        m_isDataPortBusy = true;
+
         if (!m_clients.contains(fd)) {
             m_clients[fd] = {m_dataPort, "/"};
         }
@@ -301,6 +327,8 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         return "227 Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")\n";
     } else if (cmd.cmd == "LIST") {
         //write listing to the data connection
+        m_pendingCmd = DataCommand::List;
+        m_pendingClientSocket = fd;
         return "150 Here comes the directory listing.\n";
     } else if (cmd.cmd == "CWD") {
         // This command allows the user to change the current working directory to the specified directory.

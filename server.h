@@ -21,6 +21,16 @@ class Server {
         // relative to server's rootPath
         std::string cwd;
     };
+
+    // this is server state
+    bool m_isDataPortBusy{false};
+    enum class DataCommand {
+        None,
+        List,
+        Repr
+    } m_pendingCmd{DataCommand::None};
+    int m_pendingClientSocket;
+
     using ClientSocket = int;
 
     std::unordered_map<ClientSocket, Client> m_clients;
