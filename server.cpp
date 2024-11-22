@@ -365,6 +365,26 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
         return "150 Ok to send data.\n";
     } else if (cmd.cmd == "QUIT") {
         return "221 Goodbye.\n";
+    } else if (cmd.cmd == "CDUP") {
+        // This command allows the user to move up one directory level in the server's directory tree.
+        // The server response is a 250 status code if the directory change was successful.
+        if (!m_clients.contains(fd)) {
+            m_clients[fd] = {m_dataPort, "/"}; // default directory is root
+        }
+
+        auto& cwd = m_clients[fd].cwd;
+        if (cwd == "/") {
+            return "250 Directory successfully changed.\n";
+        }
+
+        auto pos = cwd.find_last_of('/');
+        if (pos == 0) {
+            cwd = "/";
+        } else {
+            cwd = cwd.substr(0, pos);
+        }
+
+        return "250 Directory successfully changed.\n";
     }
 
     // print command byte by byte
