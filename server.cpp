@@ -56,7 +56,7 @@ std::optional<int> makeSocket(int port)
     return fd;
 }
 
-std::filesystem::path makeServerPath(std::string& subpath) {
+std::filesystem::path makeServerPath(const std::string& subpath) {
     if (subpath == "/") {
         return rootPath;
     } else {
@@ -338,11 +338,16 @@ std::string Server::makeReply(ClientSocket fd,  const Command& cmd) {
             m_clients[fd] = {m_dataPort, "/"}; // default directory is root
         }
 
-        if (auto path = ::makeServerPath(m_clients[fd].cwd) / cmd.args; std::filesystem::exists(path)) {
-            // FIXME: for the case of "." and ".."
+        // CWD can be called with absolute or relative path, former starts with /
+        const bool isAbsolutePath = cmd.args.starts_with("/");
+        auto path = isAbsolutePath ? ::makeServerPath(cmd.args) : ::makeServerPath(m_clients[fd].cwd) / cmd.args;
+        if (std::filesystem::exists(path)) {
             auto& cwd = m_clients[fd].cwd;
-            auto appender = cwd.ends_with("/") ? cmd.args : "/" + cmd.args;
-            cwd += appender;
+            if (isAbsolutePath) {
+                cwd = cmd.args;
+            } else {
+                cwd += cwd.ends_with("/") ? cmd.args : "/" + cmd.args;
+            }
             return "250 Directory successfully changed.\n";
         } else {
             // If the directory does not exist or the user does not have permission to access the directory,
